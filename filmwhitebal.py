@@ -1,17 +1,17 @@
-import argparse
-import os
+from os import listdir, makedirs, path
+from argparse import ArgumentParser
+from time import sleep
 import cv2
 import numpy as np
-import time
 from tqdm import tqdm
-from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
+from watchdog.observers import Observer
+
 from dpx import read_dpx_image_data, write_dpx, read_dpx_meta_data
 
 
 def process_image(input_path, output_path, output_format='tiff', quality=None, clip=False, exportMask=None,
                   useDpx=False):
-
     # Load input image
     if useDpx:
         # If --dpx option is used, the binary file is read and converted to uint16 np array, with value scaled
@@ -61,7 +61,8 @@ def process_image(input_path, output_path, output_format='tiff', quality=None, c
 
     # The saturation map is computed. This is simply the inverse of the saturation, so 1 corresponds to min saturation
     # and 0 to max saturation.
-    sat = 1 - (np.max(masked_analysis_img_float[:, :, :3], axis=2) - np.min(masked_analysis_img_float[:, :, :3], axis=2))
+    sat = 1 - (np.max(masked_analysis_img_float[:, :, :3], axis=2) - np.min(masked_analysis_img_float[:, :, :3],
+                                                                            axis=2))
 
     # Now we want to look for the least saturated regions, using as a threshold the level of minimum saturation
     # bringing the greates amount of information. This is accomplished by computing the absolute value of the second
@@ -218,41 +219,49 @@ def get_save_params(output_format, quality=None):
 
 
 # Scan the input directory for files.
-def get_image_files(input_directory, useDpx=False):
+def get_image_files(input_directory, useDpx=False, inputExtension=None):
     if useDpx:
-        return [f for f in os.listdir(input_directory) if f.lower().endswith('.dpx')]
+        return [f for f in listdir(input_directory) if f.lower().endswith('.dpx')]
     else:
-        return [f for f in os.listdir(input_directory) if
-                f.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp', '.gif', '.tif', '.tiff'))]
+        return [f for f in listdir(input_directory) if
+                (inputExtension is None and f.lower().endswith((
+                                   '.png', '.jpg', '.jpeg', '.bmp', '.gif', '.tif', '.tiff')))
+                or (inputExtension is not None and f.lower().endswith(inputExtension))]
 
 
 # Process each image in the input directory.
 def process_images_in_directory(input_directory, output_directory, output_format='tiff', quality=None,
-                                clip=False, exportMask=False, useDpx=False, watch=False):
+                                clip=False, exportMask=False, useDpx=False, watch=False, outputName=None, inputExtension=None):
     # Assicurati che la directory di output esista
-    os.makedirs(output_directory, exist_ok=True)
+    makedirs(output_directory, exist_ok=True)
     if useDpx:
         output_format = 'dpx'
     if exportMask:
-        os.makedirs(os.path.join(output_directory, 'masks'), exist_ok=True)
+        makedirs(path.join(output_directory, 'masks'), exist_ok=True)
 
     processed_files = set()
+
+    if outputName is None:
+        prepend_str = ''
+    else:
+        prepend_str = f"{outputName}_"
 
     def on_created(event):
         nonlocal processed_files
         if not event.is_directory and event.src_path not in processed_files:
-            if (event.src_path.lower().endswith('.dpx') and useDpx) or (not event.src_path.lower().endswith('.dpx') and not useDpx):
+            if (event.src_path.lower().endswith('.dpx') and useDpx) or (
+                    not event.src_path.lower().endswith('.dpx') and not useDpx):
                 processed_files.add(event.src_path)
                 input_path = event.src_path
-                output_path = os.path.join(output_directory,
-                                           f"processed_{os.path.splitext(os.path.basename(input_path))[0]}.{output_format}")
+                output_path = path.join(output_directory,
+                                        f"{prepend_str}{path.splitext(path.basename(input_path))[0]}.{output_format}")
                 if exportMask:
-                    output_path_masks = os.path.join(output_directory, 'masks',
-                                                     f"mask_{os.path.splitext(os.path.basename(input_path))[0]}.png")
+                    output_path_masks = path.join(output_directory, 'masks',
+                                                  f"mask_{path.splitext(path.basename(input_path))[0]}.png")
                 else:
                     output_path_masks = None
-                print(f"Processing {os.path.basename(input_path)}... ")
-                time.sleep(1)
+                print(f"Processing {path.basename(input_path)}... ")
+                sleep(1)
                 process_image(input_path, output_path, output_format, quality, clip, output_path_masks, useDpx)
                 print("done!\n\nWaiting for pictures...\n")
 
@@ -266,41 +275,45 @@ def process_images_in_directory(input_directory, output_directory, output_format
         observer.start()
         try:
             while True:
-                time.sleep(1)
+                sleep(1)
         except KeyboardInterrupt:
             observer.stop()
         observer.join()
     else:
-        image_files = get_image_files(input_directory, useDpx)
+        image_files = get_image_files(input_directory, useDpx, inputExtension)
         with tqdm(image_files, desc="Processing images") as pbar:
             for image_file in pbar:
-                input_path = os.path.join(input_directory, image_file)
-                output_path = os.path.join(output_directory,
-                                           f"processed_{os.path.splitext(image_file)[0]}.{output_format}")
+                input_path = path.join(input_directory, image_file)
+                output_path = path.join(output_directory,
+                                        f"{prepend_str}{path.splitext(image_file)[0]}.{output_format}")
                 if exportMask:
-                    output_path_masks = os.path.join(output_directory, 'masks',
-                                                     f"mask_{os.path.splitext(image_file)[0]}.png")
+                    output_path_masks = path.join(output_directory, 'masks',
+                                                  f"mask_{path.splitext(image_file)[0]}.png")
                 else:
                     output_path_masks = None
                 process_image(input_path, output_path, output_format, quality, clip, output_path_masks, useDpx)
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description='Process images and perform white balance on film scans.')
-    parser.add_argument('input_directory', help='Input directory containing images')
-    parser.add_argument('output_directory', help='Output directory for processed images')
-    parser.add_argument('--format', help='Output image format (default: TIFF, accepted values: png, jpg, jpeg, bmp, '
-                                         'tiff)', default='tiff')
-    parser.add_argument('--quality', type=int, help='Quality setting for JPG format (default: 95)')
-    parser.add_argument('--clip', action='store_true',
-                        help='Clip values after equalization instead of linear rescaling ('
-                             'default: False)')
-    parser.add_argument('--exportMask', action='store_true',
-                        help='Export white masks for debugging purposes (default: False)')
+    parser = ArgumentParser(description='Process images and perform white balance on film scans.')
+    parser.add_argument('input_directory', help='Input directory containing images.')
+    parser.add_argument('output_directory', help='Output directory for processed images.')
+    parser.add_argument('--outputName', type=str, help='Prepend string followed by underscore to the output filename.')
     parser.add_argument('--dpx', action='store_true',
                         help='Read and write DPX files preserving (if possible) metadata. (default: False)')
+    parser.add_argument('--format', help='Output image format. Ignored if --dpx option is used. (default: TIFF, '
+                                         'accepted values: png, jpg, jpeg, bmp,'
+                                         'tiff)', default='tiff')
+    parser.add_argument('--inputExtension', type=str, help='Load only images with given extension. Ignored if --dpx '
+                                                           'option is used.')
+    parser.add_argument('--quality', type=int, help='Quality setting for JPG format. (default: 95)')
+    parser.add_argument('--clip', action='store_true',
+                        help='Clip values after equalization instead of linear rescaling. ('
+                             'default: False)')
+    parser.add_argument('--exportMask', action='store_true',
+                        help='Export white masks for debugging purposes. (default: False)')
     parser.add_argument('--watch', action='store_true',
-                        help='Watch for new files in the input directory and process them')
+                        help='Watch for new files in the input directory and process them.')
 
     args = parser.parse_args()
 
@@ -312,6 +325,8 @@ if __name__ == "__main__":
     exportMask = args.exportMask
     useDpx = args.dpx
     watch = args.watch
+    outputName = args.outputName
+    inputExtension = args.inputExtension
 
     process_images_in_directory(input_directory, output_directory, output_format, quality, clip, exportMask, useDpx,
-                                watch)
+                                watch, outputName, inputExtension)
