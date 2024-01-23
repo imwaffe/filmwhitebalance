@@ -1,33 +1,5 @@
-"""
-dpx.py
-
-Read Metadata and Image data from 10-bit DPX files in Python 3
-
-Copyright (c) 2016 Jack Doerner
-
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in
-all copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
-THE SOFTWARE.
-"""
-
 import struct
 import numpy as np
-
-test_filename = "test.dpx"
 
 orientations = {
     0: "Left to Right, Top to Bottom",
@@ -241,58 +213,3 @@ def write_dpx(f, image: np.ndarray, meta):
     f.seek(meta['offset'])
     raw.tofile(f, sep="")
 
-
-if __name__ == "__main__":
-    with open("C:\\Users\\lucaa\\Pictures\\DPX_TEST\\dpx_test\\out\\processed_KINETTA_BATTAGLIA_K_R02_001231.dpx", "rb") as f:
-        meta = read_dpx_meta_data(f)
-        if meta is None:
-            print("Invalid File")
-        else:
-            import binascii
-
-            print("\nFILE INFORMATION HEADER")
-
-            print("Endianness:", "Big Endian" if meta['endianness'] == ">" else "Little Endian")
-            print("Image Offset (Bytes):", meta['offset'])
-            print("DPX Version:", meta['dpx_version'])
-            print("File Size (Bytes):", meta['file_size'])
-            print("Ditto Flag:", "New Frame" if meta['ditto'] else "Same as Previous Frame")
-            print("Image Filename:", meta['filename'])
-            print("Creation Timestamp:", meta['timestamp'])
-            print("Creator:", meta['creator'])
-            print("Project Name:", meta['project_name'])
-            print("Copyright:", meta['copyright'])
-            print("Encryption Key:", "Unencrypted" if meta['encryption_key'] == 0xFFFFFFFF else binascii.hexlify(
-                bin(meta['encryption_key'])))
-
-            print("\nIMAGE INFORMATION HEADER")
-            print("Orientation:",
-                  orientations[meta['orientation']] if meta['orientation'] in orientations else "unknown")
-            print("Image Element Count:", meta['image_element_count'])
-            print("Width:", meta['width'])
-            print("Height:", meta['height'])
-
-            print("\nIMAGE ELEMENT 1")
-            print("Data Sign:", "signed" if meta['data_sign'] == 1 else "unsigned")
-            print("Descriptor:",
-                  descriptors[meta['descriptor']] if meta['descriptor'] in descriptors else "unknown")
-            print("Transfer:", transfers[meta['transfer_characteristic']] if meta[
-                                                                                 'transfer_characteristic'] in transfers else "unknown")
-            print("Colorimetry:",
-                  colorimetries[meta['colorimetry']] if meta['colorimetry'] in colorimetries else "unknown")
-            print("Bit Depth:", meta['depth'])
-            print("Packing:", packings[meta['packing']] if meta['packing'] in packings else "unknown")
-            print("Encoding:", encodings[meta['encoding']] if meta['encoding'] in encodings else "unknown")
-            print("End of Line Padding:", meta['line_padding'])
-            print("End of Image Padding:", meta['image_padding'])
-            print("Image Element Description:", meta['image_element_description'])
-
-            print("\nIMAGE SOURCE INFORMATION HEADER")
-            print("Input Device Name:", meta['input_device_name'])
-            print("Input Device Serial Number:", meta['input_device_sn'])
-
-            print("\n")
-
-            image = read_dpx_image_data(f, meta)
-
-            print(type(image))

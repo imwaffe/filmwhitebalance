@@ -3,7 +3,6 @@ import os
 import cv2
 import numpy as np
 import time
-import concurrent.futures
 from tqdm import tqdm
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
@@ -12,8 +11,11 @@ from dpx import read_dpx_image_data, write_dpx, read_dpx_meta_data
 
 def process_image(input_path, output_path, output_format='tiff', quality=None, clip=False, exportMask=None,
                   useDpx=False):
-    # Carica l'immagine di input
+
+    # Load input image
     if useDpx:
+        # If --dpx option is used, the binary file is read and converted to uint16 np array, with value scaled
+        # between 0 and 65535 regardless of the actual bit depth.
         with open(input_path, "rb") as input_file:
             metadata = read_dpx_meta_data(input_file)
             float_img = read_dpx_image_data(input_file, metadata=metadata)
@@ -28,60 +30,83 @@ def process_image(input_path, output_path, output_format='tiff', quality=None, c
     img = input_img.copy()
     max_val = np.iinfo(img.dtype).max
 
-    # Filtro gaussiano
-    img_filt = cv2.GaussianBlur(cv2.resize(img, [200, 200]), (9, 9), 1)
+    # The blurred and scaled to 200x200 image is used for analysis to save time.
+    analysis_img_int = cv2.GaussianBlur(cv2.resize(img, [200, 200]), (9, 9), 1)
 
-    # Basic lift removal
+    # Basic lift removal: a 1D lut per channel is computed in order to remove lift.
+    # img might contain values greater than dtype.max, thus need to be rescaled later.
     for c in range(3):
-        hist = np.cumsum(np.bincount(np.ravel(img_filt[:, :, c]), minlength=max_val + 1))
+        hist = np.cumsum(np.bincount(np.ravel(analysis_img_int[:, :, c]), minlength=max_val + 1))
         histeq_thrs_min = max(0, np.sum(hist < 1) - 1)
         histeq_thrs_max = min(np.sum(hist < np.max(hist)) + 1, max_val)
         m = max_val / (histeq_thrs_max - histeq_thrs_min)
         lut = np.array([np.clip((m * (l - histeq_thrs_min)), 0, max_val) for l in range(max_val + 1)]).astype(img.dtype)
         img[:, :, c] = lut[img[:, :, c]]
-        img_filt[:, :, c] = lut[img_filt[:, :, c]]
+        analysis_img_int[:, :, c] = lut[analysis_img_int[:, :, c]]
 
-    img_filt_float = img_filt.astype(np.float32) / max_val
+    # The analysis image is converted to float32 and scaled between 0 and 1
+    analysis_img_float = analysis_img_int.astype(np.float32) / max_val
 
-    # Calcola il canale scuro
-    img_dark = np.min(img_filt_float[:, :, :3], axis=2)
+    # Dark channel is computed
+    dark_channel_img = np.min(analysis_img_float[:, :, :3], axis=2)
 
-    # Maschera per il canale scuro
-    mask = (img_dark > np.mean(img_dark)) & (img_dark < 0.9) & (img_dark > 0.1)
+    # The first mask is computed based on the dark channel of the analysis image.
+    # The mask identifies the pixels having dark channel value greater than the average dark channel value for the whole
+    # image. Pixels with values lower than 0.1 or greater than 0.9 are excluded to avoid using too dark or clipped
+    # RGB values.
+    mask = (dark_channel_img > np.mean(dark_channel_img)) & (dark_channel_img < 0.9) & (dark_channel_img > 0.1)
 
-    # Applica la maschera all'immagine filtrata
-    masked_img_float = img_filt_float * mask[:, :, np.newaxis]
-    sat = 1 - (np.max(masked_img_float[:, :, :3], axis=2) - np.min(masked_img_float[:, :, :3], axis=2))
+    # The analysis image is masked with the dark channel mask.
+    masked_analysis_img_float = analysis_img_float * mask[:, :, np.newaxis]
 
-    # Maschera di saturazione
+    # The saturation map is computed. This is simply the inverse of the saturation, so 1 corresponds to min saturation
+    # and 0 to max saturation.
+    sat = 1 - (np.max(masked_analysis_img_float[:, :, :3], axis=2) - np.min(masked_analysis_img_float[:, :, :3], axis=2))
+
+    # Now we want to look for the least saturated regions, using as a threshold the level of minimum saturation
+    # bringing the greates amount of information. This is accomplished by computing the absolute value of the second
+    # derivative of the saturation histogram and using as threshold the first local minimum encountered.
+    # 1) The cumulative histogram of the saturation is computed using only 20 bins (to account for noise)
     bins = 20
     sat_hist = np.histogram(sat[sat < 1], bins=bins)[0]
+    # 2) We compute der_cumsum_hist as the absolute value of the second derivative of the histogram
     der_cumsum_hist = np.diff(np.abs(np.diff(np.cumsum(sat_hist))))
     sat_thrs = 1
     mins_cnt = 0
+    # 3) Starting from the values of least saturation (from the right of the histogram), we move toward the values of
+    #    higher saturation and look for the first local minimum.
+    #    From this step we take the sat_thrs = argmin(der_cumsum_hist).
     for c in range(bins - 4, 1, -1):
         if der_cumsum_hist[c + 1] > der_cumsum_hist[c] < der_cumsum_hist[c - 1]:
             mins_cnt += 1
             if mins_cnt == 1:
                 sat_thrs = c * 5 / 100
                 break
+    # 4) The new mask is computed by taking the dark channel mask and keeping only the pixels having value
+    #    greater than or equal to the sat_thrs quantile of the saturation map.
     mask = ((sat >= np.quantile(sat[sat < 1], sat_thrs)) & (sat < 1)).astype(img.dtype)
 
+    # We filter out the computed mask based on the connected components.
+    # Aim of this step is to keep only the biggest, least saturated and most uniform regions.
     mask_connected = select_connected_components(mask, sat)
-    masked_img_connected = img_filt * mask_connected[:, :, np.newaxis]
 
-    # Applica la maschera di saturazione all'immagine con maschera del canale scuro
-    masked_img_not_connected = img_filt * mask[:, :, np.newaxis]
+    # The analysis image is masked with the obtained mask.
+    masked_img_connected = analysis_img_int * mask_connected[:, :, np.newaxis]
 
-    # Calcola la media di ogni canale dei pixel non mascherati dell'immagine
+    # The analysis image is masked with the mask without the connected regions-based filtering, this is used only
+    # for debugging purposes with --exportMask option enabled.
+    masked_img_not_connected = analysis_img_int * mask[:, :, np.newaxis]
+
+    # We compute avg[] as each channel's average value from the masked analysis image.
     avg = [np.mean(np.ma.masked_equal(masked_img_connected[:, :, c], 0)) for c in range(3)]
 
-    # Calcola la luminosità media delle regioni non mascherate dell'immagine originale
+    # From avg[] we computed avg_brightness as the average brightness of the unmasked regions.
     avg_brightness = 0.299 * avg[0] + 0.587 * avg[1] + 0.114 * avg[2]
 
     img_wb = np.zeros(img.shape)
     img_norm = np.zeros(3)
-    # Calcola i coefficienti del bilanciamento del bianco e correggi l'immagine originale
+    # We compute the white balance coefficients as coeff[c] = avg_brightness/avg[c].
+    # Using the computed coefficients all the pixels in the actual input img is scaled.
     for c in range(3):
         if clip:
             img_wb[:, :, c] = np.clip(img[:, :, c] * (avg_brightness / avg[c]), 0, max_val)
@@ -89,10 +114,13 @@ def process_image(input_path, output_path, output_format='tiff', quality=None, c
             img_wb[:, :, c] = img[:, :, c] * (avg_brightness / avg[c])
             img_norm[c] = (max_val / max(np.max(np.ravel(img_wb[:, :, c])), max_val))
 
+    # If --clip option is not used, all the pixels values are scaled based on the absolute maximum value to prevent
+    # clipping for pixels having values above dtype.max
     if not clip:
         for c in range(3):
             img_wb[:, :, c] = np.clip(img_wb[:, :, c] * np.min(img_norm), 0, max_val)
 
+    # If --dpx option is used, the file is written using write_dpx function.
     if useDpx:
         with open(output_path, "wb+") as output_file:
             metadata['creator'] = "Luchino's fucking unsupervised white balance algorithm :) - " + metadata['creator']
@@ -101,6 +129,8 @@ def process_image(input_path, output_path, output_format='tiff', quality=None, c
     else:
         cv2.imwrite(output_path, img_wb.astype(img.dtype), params=get_save_params(output_format, quality))
 
+    # If --exportMask option is used, a "masks" folder is created in the output directory and both normal and
+    # connected-regions-filtered masks are written in PNG files.
     if exportMask is not None:
         cv2.imwrite(exportMask, np.hstack([masked_img_not_connected, masked_img_connected]),
                     params=get_save_params('png', None))
@@ -126,18 +156,25 @@ def select_connected_components(binary_image, sat):
     for i in np.argsort(stats[1:, cv2.CC_STAT_AREA])[::-1]:
         left, top, width, height, area = stats[i + 1]  # i + 1 to account for the background component
 
-        # Requirement 1: At least 90% of the area of the largest connected component
         if area >= 0.5 * max_area:
+            # Components having area of the least half of the maximum area are appended in selected_big_components list
             selected_big_components.append(labels == i + 1)
             total_big_components_area += area
         elif total_small_components_area + total_big_components_area + area <= 0.5 * total_area:
+            # Smaller components are appended in the selected_small_components list, until at least half of the total
+            # area of all connnected-regions has been indexed in selected_big_components or selected_small_components.
             selected_small_components.append(labels == i + 1)
             total_small_components_area += area
         else:
             break
 
-    # big_component_stats: column_0->variance; column_1->mean;
+    # If the total area of the bigger components is greater than the total area of the smaller components,
+    # the smaller ones are discarded.
     if total_big_components_area > total_small_components_area:
+        # We compute a list of statistics for each big component having (for columns):
+        #   0) The variance of the saturation of the region
+        #   1) The average of the saturation of the region
+        #   2) The index of the connected component
         big_components_stats = np.empty([len(selected_big_components), 3])
         for i in range(len(selected_big_components)):
             big_components_stats[i, 0] = np.var(sat[selected_big_components[i]])
@@ -146,13 +183,17 @@ def select_connected_components(binary_image, sat):
 
         current_var_thrs = 1
         best_component = 0
+        # The components are sorted in descending order based on the average saturation value (remember that the
+        # saturation map is the inverse of the actual saturation).
         for i in np.argsort(big_components_stats[:, 1])[::-1]:
+            # If the variance of the component is lower than 90% of that of the less saturated component, we select the
+            # component with less variance, otherwise we select the component with less average saturation.
             if big_components_stats[i, 0] < 0.9 * current_var_thrs:
                 current_var_thrs = big_components_stats[i, 0]
                 best_component = i
         return selected_big_components[big_components_stats[best_component, 2].astype(np.uint8)]
 
-    # Create the resulting image
+    # Create the resulting binary mask
     selected_image = np.zeros_like(binary_image)
     for component in selected_big_components:
         selected_image[component] = 1
@@ -162,6 +203,7 @@ def select_connected_components(binary_image, sat):
     return selected_image
 
 
+# Get command line parameters.
 def get_save_params(output_format, quality=None):
     if output_format.lower() == 'png':
         return [cv2.IMWRITE_PNG_COMPRESSION, 5]
@@ -175,6 +217,7 @@ def get_save_params(output_format, quality=None):
         return [cv2.IMWRITE_TIFF_COMPRESSION, 5]
 
 
+# Scan the input directory for files.
 def get_image_files(input_directory, useDpx=False):
     if useDpx:
         return [f for f in os.listdir(input_directory) if f.lower().endswith('.dpx')]
@@ -183,6 +226,7 @@ def get_image_files(input_directory, useDpx=False):
                 f.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp', '.gif', '.tif', '.tiff'))]
 
 
+# Process each image in the input directory.
 def process_images_in_directory(input_directory, output_directory, output_format='tiff', quality=None,
                                 clip=False, exportMask=False, useDpx=False, watch=False):
     # Assicurati che la directory di output esista
