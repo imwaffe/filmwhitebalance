@@ -6,8 +6,43 @@ import numpy as np
 from tqdm import tqdm
 from watchdog.events import FileSystemEventHandler
 from watchdog.observers import Observer
+import threading
+import numba as nb
 
 from dpx import read_dpx_image_data, write_dpx, read_dpx_meta_data
+
+
+# The 1D luts to the final image is applied in parallel, which led to a reduction in processing time of >50% for larger
+# images
+@nb.njit(parallel=True)
+def apply_lut_parallel_single_channel(img, lut):
+    height, width = img.shape
+    for i in nb.prange(height):
+        for j in range(width):
+            img[i, j] = lut[img[i, j]]
+    return img
+
+
+# White balance with computed coefficients is performed in parallel using one thread per channel,
+# which led to a reduction in processing time of >50% for larger images
+@nb.njit(parallel=True)
+def white_balance_parallel(img, clip, avg_brightness, avg, max_val):
+    img_wb = np.zeros_like(img, dtype=np.float32)
+    img_norm = np.zeros(3, dtype=np.float32)
+    for c in nb.prange(3):
+        if clip:
+            img_wb[:, :, c] = np.clip(img[:, :, c] * (avg_brightness / avg[c]), 0, max_val)
+        else:
+            img_wb[:, :, c] = img[:, :, c] * (avg_brightness / avg[c])
+            img_norm[c] = (max_val / np.maximum(np.max(img_wb[:, :, c]), max_val))
+
+    # If --clip option is not used, all the pixels values are scaled based on the absolute maximum value to prevent
+    # clipping for pixels having values above dtype.max
+    if not clip:
+        for c in nb.prange(3):
+            img_wb[:, :, c] = np.clip(img_wb[:, :, c] * np.min(img_norm), 0, max_val)
+
+    return img_wb
 
 
 def process_image(input_path, output_path, output_format='tiff', quality=None, clip=False, exportMask=None,
@@ -29,23 +64,23 @@ def process_image(input_path, output_path, output_format='tiff', quality=None, c
 
     img = input_img.copy()
     max_val = np.iinfo(img.dtype).max
-
     # The blurred and scaled to 200x200 image is used for analysis to save time.
     analysis_img_int = cv2.GaussianBlur(cv2.resize(img, [200, 200]), (9, 9), 1)
 
     # Basic lift removal: a 1D lut per channel is computed in order to remove lift.
     # img might contain values greater than dtype.max, thus need to be rescaled later.
     for c in range(3):
-        hist = np.cumsum(np.bincount(np.ravel(analysis_img_int[:, :, c]), minlength=max_val + 1))
+        hist = np.cumsum(np.bincount(analysis_img_int[:, :, c].ravel(), minlength=max_val + 1))
         histeq_thrs_min = max(0, np.sum(hist < 1) - 1)
         histeq_thrs_max = min(np.sum(hist < np.max(hist)) + 1, max_val)
         m = max_val / (histeq_thrs_max - histeq_thrs_min)
-        lut = np.array([np.clip((m * (l - histeq_thrs_min)), 0, max_val) for l in range(max_val + 1)]).astype(img.dtype)
-        img[:, :, c] = lut[img[:, :, c]]
+        lut = np.clip((m * (np.arange(max_val + 1) - histeq_thrs_min)), 0, max_val).astype(img.dtype)
         analysis_img_int[:, :, c] = lut[analysis_img_int[:, :, c]]
+        # The LUTs to the full size image are applied in parallel
+        img[:, :, c] = apply_lut_parallel_single_channel(img[:, :, c], lut)
 
     # The analysis image is converted to float32 and scaled between 0 and 1
-    analysis_img_float = analysis_img_int.astype(np.float32) / max_val
+    analysis_img_float = (analysis_img_int / max_val).astype(np.float32)
 
     # Dark channel is computed
     dark_channel_img = np.min(analysis_img_float[:, :, :3], axis=2)
@@ -68,8 +103,7 @@ def process_image(input_path, output_path, output_format='tiff', quality=None, c
     # bringing the greates amount of information. This is accomplished by computing the absolute value of the second
     # derivative of the saturation histogram and using as threshold the first local minimum encountered.
     # 1) The cumulative histogram of the saturation is computed using only 20 bins (to account for noise)
-    bins = 20
-    sat_hist = np.histogram(sat[sat < 1], bins=bins)[0]
+    sat_hist = np.histogram(sat[sat < 1], bins=20)[0]
     # 2) We compute der_cumsum_hist as the absolute value of the second derivative of the histogram
     der_cumsum_hist = np.diff(np.abs(np.diff(np.cumsum(sat_hist))))
     sat_thrs = 1
@@ -77,12 +111,13 @@ def process_image(input_path, output_path, output_format='tiff', quality=None, c
     # 3) Starting from the values of least saturation (from the right of the histogram), we move toward the values of
     #    higher saturation and look for the first local minimum.
     #    From this step we take the sat_thrs = argmin(der_cumsum_hist).
-    for c in range(bins - 4, 1, -1):
+    for c in range(16, 1, -1):
         if der_cumsum_hist[c + 1] > der_cumsum_hist[c] < der_cumsum_hist[c - 1]:
             mins_cnt += 1
             if mins_cnt == 1:
                 sat_thrs = c * 5 / 100
                 break
+
     # 4) The new mask is computed by taking the dark channel mask and keeping only the pixels having value
     #    greater than or equal to the sat_thrs quantile of the saturation map.
     mask = ((sat >= np.quantile(sat[sat < 1], sat_thrs)) & (sat < 1)).astype(img.dtype)
@@ -92,11 +127,11 @@ def process_image(input_path, output_path, output_format='tiff', quality=None, c
     mask_connected = select_connected_components(mask, sat)
 
     # The analysis image is masked with the obtained mask.
-    masked_img_connected = analysis_img_int * mask_connected[:, :, np.newaxis]
+    masked_img_connected = (analysis_img_int * mask_connected[:, :, np.newaxis]).astype(img.dtype)
 
     # The analysis image is masked with the mask without the connected regions-based filtering, this is used only
     # for debugging purposes with --exportMask option enabled.
-    masked_img_not_connected = analysis_img_int * mask[:, :, np.newaxis]
+    masked_img_not_connected = (analysis_img_int * mask[:, :, np.newaxis]).astype(img.dtype)
 
     # We compute avg[] as each channel's average value from the masked analysis image.
     avg = [np.mean(np.ma.masked_equal(masked_img_connected[:, :, c], 0)) for c in range(3)]
@@ -104,22 +139,9 @@ def process_image(input_path, output_path, output_format='tiff', quality=None, c
     # From avg[] we computed avg_brightness as the average brightness of the unmasked regions.
     avg_brightness = 0.299 * avg[0] + 0.587 * avg[1] + 0.114 * avg[2]
 
-    img_wb = np.zeros(img.shape)
-    img_norm = np.zeros(3)
     # We compute the white balance coefficients as coeff[c] = avg_brightness/avg[c].
     # Using the computed coefficients all the pixels in the actual input img is scaled.
-    for c in range(3):
-        if clip:
-            img_wb[:, :, c] = np.clip(img[:, :, c] * (avg_brightness / avg[c]), 0, max_val)
-        else:
-            img_wb[:, :, c] = img[:, :, c] * (avg_brightness / avg[c])
-            img_norm[c] = (max_val / max(np.max(np.ravel(img_wb[:, :, c])), max_val))
-
-    # If --clip option is not used, all the pixels values are scaled based on the absolute maximum value to prevent
-    # clipping for pixels having values above dtype.max
-    if not clip:
-        for c in range(3):
-            img_wb[:, :, c] = np.clip(img_wb[:, :, c] * np.min(img_norm), 0, max_val)
+    img_wb = white_balance_parallel(img, clip, avg_brightness, avg, max_val)
 
     # If --dpx option is used, the file is written using write_dpx function.
     if useDpx:
@@ -225,13 +247,14 @@ def get_image_files(input_directory, useDpx=False, inputExtension=None):
     else:
         return [f for f in listdir(input_directory) if
                 (inputExtension is None and f.lower().endswith((
-                                   '.png', '.jpg', '.jpeg', '.bmp', '.gif', '.tif', '.tiff')))
+                    '.png', '.jpg', '.jpeg', '.bmp', '.gif', '.tif', '.tiff')))
                 or (inputExtension is not None and f.lower().endswith(inputExtension))]
 
 
 # Process each image in the input directory.
 def process_images_in_directory(input_directory, output_directory, output_format='tiff', quality=None,
-                                clip=False, exportMask=False, useDpx=False, watch=False, outputName=None, inputExtension=None):
+                                clip=False, exportMask=False, useDpx=False, watch=False, outputName=None,
+                                inputExtension=None):
     # Assicurati che la directory di output esista
     makedirs(output_directory, exist_ok=True)
     if useDpx:
