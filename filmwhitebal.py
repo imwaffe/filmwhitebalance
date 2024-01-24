@@ -137,7 +137,7 @@ def process_image(input_path, output_path, output_format='tiff', quality=None, c
     avg = [np.mean(np.ma.masked_equal(masked_img_connected[:, :, c], 0)) for c in range(3)]
 
     # From avg[] we computed avg_brightness as the average brightness of the unmasked regions.
-    avg_brightness = 0.299 * avg[0] + 0.587 * avg[1] + 0.114 * avg[2]
+    avg_brightness = 0.299 * avg[2] + 0.587 * avg[1] + 0.114 * avg[0]
 
     # We compute the white balance coefficients as coeff[c] = avg_brightness/avg[c].
     # Using the computed coefficients all the pixels in the actual input img is scaled.
