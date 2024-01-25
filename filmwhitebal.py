@@ -121,6 +121,7 @@ def process_image(input_path, output_path, output_format='tiff', quality=None, c
     # 4) The new mask is computed by taking the dark channel mask and keeping only the pixels having value
     #    greater than or equal to the sat_thrs quantile of the saturation map.
     mask = ((sat >= np.quantile(sat[sat < 1], sat_thrs)) & (sat < 1)).astype(img.dtype)
+    # mask = ((sat >= sat_thrs) & (sat < 1)).astype(img.dtype)
 
     # We filter out the computed mask based on the connected components.
     # Aim of this step is to keep only the biggest, least saturated and most uniform regions.
@@ -169,59 +170,46 @@ def select_connected_components(binary_image, sat):
     # Initialize the total selected area
     total_area = np.sum(stats[1:, cv2.CC_STAT_AREA])
 
-    # Initialize the selected components
-    selected_small_components = []
-    total_small_components_area = 0
-    selected_big_components = []
-    total_big_components_area = 0
+    components_scores = []
 
     # Iterate through connected components in descending order of area
     for i in np.argsort(stats[1:, cv2.CC_STAT_AREA])[::-1]:
         left, top, width, height, area = stats[i + 1]  # i + 1 to account for the background component
+        # fullness = max(1, (area / (np.power(min(width, height) / 2, 2) * np.pi)))
+        fullness = area / (width * height)
+        squareness = min(width, height) / max(width, height)
+        greatness = area / total_area
+        avg_sat = np.mean(sat[labels == i + 1])
+        var_sat = np.var(sat[labels == i + 1])
+        components_scores.append([i + 1, fullness * squareness, area, avg_sat, var_sat])
 
-        if area >= 0.5 * max_area:
-            # Components having area of the least half of the maximum area are appended in selected_big_components list
-            selected_big_components.append(labels == i + 1)
-            total_big_components_area += area
-        elif total_small_components_area + total_big_components_area + area <= 0.5 * total_area:
-            # Smaller components are appended in the selected_small_components list, until at least half of the total
-            # area of all connnected-regions has been indexed in selected_big_components or selected_small_components.
-            selected_small_components.append(labels == i + 1)
-            total_small_components_area += area
-        else:
-            break
+    components_scores_array = np.array(components_scores)
 
-    # If the total area of the bigger components is greater than the total area of the smaller components,
-    # the smaller ones are discarded.
-    if total_big_components_area > total_small_components_area:
-        # We compute a list of statistics for each big component having (for columns):
-        #   0) The variance of the saturation of the region
-        #   1) The average of the saturation of the region
-        #   2) The index of the connected component
-        big_components_stats = np.empty([len(selected_big_components), 3])
-        for i in range(len(selected_big_components)):
-            big_components_stats[i, 0] = np.var(sat[selected_big_components[i]])
-            big_components_stats[i, 1] = np.mean(sat[selected_big_components[i]])
-            big_components_stats[i, 2] = i
+    quant = max(64, (np.quantile(components_scores_array[1:, 2], 0.9)))
 
-        current_var_thrs = 1
-        best_component = 0
-        # The components are sorted in descending order based on the average saturation value (remember that the
-        # saturation map is the inverse of the actual saturation).
-        for i in np.argsort(big_components_stats[:, 1])[::-1]:
-            # If the variance of the component is lower than 90% of that of the less saturated component, we select the
-            # component with less variance, otherwise we select the component with less average saturation.
-            if big_components_stats[i, 0] < 0.9 * current_var_thrs:
-                current_var_thrs = big_components_stats[i, 0]
-                best_component = i
-        return selected_big_components[big_components_stats[best_component, 2].astype(np.uint8)]
+    selected_components_scores = []
+    selected_area = 0
+    for i in np.argsort(components_scores_array[0:, 1])[::-1]:
+        if components_scores_array[i, 2] >= quant:
+            selected_components_scores.append(components_scores_array[i, :])
+            selected_area = selected_area + components_scores_array[i, 2]
+            if selected_area > 0.1 * total_area:
+                break
 
-    # Create the resulting binary mask
+    if selected_area == 0:
+        return binary_image
+
     selected_image = np.zeros_like(binary_image)
-    for component in selected_big_components:
-        selected_image[component] = 1
-    for component in selected_small_components:
-        selected_image[component] = 1
+
+    selected_components_scores_array = np.array(selected_components_scores)
+
+    avg_var = np.var(selected_components_scores_array[0:, 4])
+    last_sat = 0
+    for i in np.argsort(selected_components_scores_array[0:, 3])[::-1]:
+        selected_image[labels == selected_components_scores_array[i, 0]] = 1
+        if selected_components_scores_array[i, 3] < 0.9 * last_sat and selected_components_scores_array[i, 4] < avg_var:
+            break
+        last_sat = selected_components_scores_array[i, 3]
 
     return selected_image
 
