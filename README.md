@@ -14,14 +14,15 @@ py -m pip install argparse opencv.python numpy tqdm watchdog numba==0.59.0rc1
 ### Usage
 This is a command line program, following is the syntax (if using the executable).
 ~~~
-usage: filmwhitebal [-h] [--outputName OUTPUTNAME] [--dpx] [--format FORMAT] [--inputExtension INPUTEXTENSION]
-                    [--quality QUALITY] [--clip] [--exportMask] [--watch]
-                    input_directory output_directory
+usage: filmwhitebal.py [-h] [--outputName OUTPUTNAME] [--dpx] [--format FORMAT] [--inputExtension INPUTEXTENSION]
+                       [--quality QUALITY] [--clip] [--exportMask] [--watch]
+                       input_path output_directory
 
-Process images and perform white balance on film scans.
+Luchino's fucking unsupervised white balance algorithm for films :) Process images and perform white balance on film
+scans.
 
 positional arguments:
-  input_directory       Input directory containing images.
+  input_path            Input file or directory containing images.
   output_directory      Output directory for processed images.
 
 options:
@@ -30,9 +31,9 @@ options:
                         Prepend string followed by underscore to the output filename.
   --dpx                 Read and write DPX files preserving (if possible) metadata. (default: False)
   --format FORMAT       Output image format. Ignored if --dpx option is used. (default: TIFF, accepted values: png,
-                        jpg, jpeg, bmp,tiff)
+                        jpg, jpeg, bmp, tiff)
   --inputExtension INPUTEXTENSION
-                        Load only images with given extension. Ignored if --dpx option is used.
+                        Load only images with given extension in input directory. Ignored if --dpx option is used.
   --quality QUALITY     Quality setting for JPG format. (default: 95)
   --clip                Clip values after equalization instead of linear rescaling. (default: False)
   --exportMask          Export white masks for debugging purposes. (default: False)
