@@ -164,53 +164,67 @@ def select_connected_components(binary_image, sat):
     # Find connected regions in the binary image
     num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(binary_image.astype(np.uint8))
 
-    # Find the maximum area among all connected components
-    max_area = np.max(stats[1:, cv2.CC_STAT_AREA])
-
     # Initialize the total selected area
     total_area = np.sum(stats[1:, cv2.CC_STAT_AREA])
 
+    # Component score calculation: for each component, we compute a score (between 0 and 1) which is a result of the
+    # product of two indicators: squareness and fullness. Squareness amounts to 1 for a component whose bounding box is
+    # square and decreases as the bounding box becomes more of a rectangle; fullness amounts to 1 when the area of the
+    # component equals that of the bounding box and decreases as the area of the component lowers.
+    # Saturation stats calculation: for each component, the average saturation and the variance in saturation of the
+    # component is computed.
+    # All the stats are saved in the component_scores_array array.
     components_scores = []
-
-    # Iterate through connected components in descending order of area
     for i in np.argsort(stats[1:, cv2.CC_STAT_AREA])[::-1]:
         left, top, width, height, area = stats[i + 1]  # i + 1 to account for the background component
         # fullness = max(1, (area / (np.power(min(width, height) / 2, 2) * np.pi)))
         fullness = area / (width * height)
         squareness = min(width, height) / max(width, height)
-        greatness = area / total_area
         avg_sat = np.mean(sat[labels == i + 1])
         var_sat = np.var(sat[labels == i + 1])
         components_scores.append([i + 1, fullness * squareness, area, avg_sat, var_sat])
-
     components_scores_array = np.array(components_scores)
 
+    # We filter out the smaller components based on the 90% percentile of the area of the regions. A minimum threshold
+    # of 64 is set.
     quant = max(64, (np.quantile(components_scores_array[1:, 2], 0.9)))
 
     selected_components_scores = []
     selected_area = 0
+    # We sort the components in descending order based on the previously computed score
     for i in np.argsort(components_scores_array[0:, 1])[::-1]:
+        # We discard the smaller components
         if components_scores_array[i, 2] >= quant:
+            # We select the components in order until we reach at least 10% of the total area of the components
             selected_components_scores.append(components_scores_array[i, :])
             selected_area = selected_area + components_scores_array[i, 2]
             if selected_area > 0.1 * total_area:
                 break
 
+    # In case we couldn't find any component satisfying any of the conditions, we return the whole binary image,
+    # thus ignoring the connected-regions-based filtering.
     if selected_area == 0:
         return binary_image
 
     selected_image = np.zeros_like(binary_image)
-
     selected_components_scores_array = np.array(selected_components_scores)
 
     avg_var = np.var(selected_components_scores_array[0:, 4])
     last_sat = 0
+    # We iterate through the selected components from the previous step in descending order based on the average
+    # saturation. Remember that the saturation map is computed as the inverse of the saturation, so we are actually
+    # iterating based on saturation in ascending order.
     for i in np.argsort(selected_components_scores_array[0:, 3])[::-1]:
+        # The first least saturated region is selected
         selected_image[labels == selected_components_scores_array[i, 0]] = 1
+        # We keep selecting regions having an average saturation value of at least 90% that of the previous (to include
+        # similar regions) and with a saturation variance which is less than the average saturation variance among
+        # all regions.
         if selected_components_scores_array[i, 3] < 0.9 * last_sat and selected_components_scores_array[i, 4] < avg_var:
             break
         last_sat = selected_components_scores_array[i, 3]
 
+    # We return the mask as a binary image
     return selected_image
 
 
