@@ -1,3 +1,4 @@
+import os.path
 from os import listdir, makedirs, path
 from argparse import ArgumentParser
 from time import sleep
@@ -254,9 +255,16 @@ def get_image_files(input_directory, useDpx=False, inputExtension=None):
 
 
 # Process each image in the input directory.
-def process_images_in_directory(input_directory, output_directory, output_format='tiff', quality=None,
+def process_images_in_directory(input_path, output_directory, output_format='tiff', quality=None,
                                 clip=False, exportMask=False, useDpx=False, watch=False, outputName=None,
                                 inputExtension=None):
+    if not path.exists(input_path):
+        print("Input file or directory does not exist.")
+        return -1
+    if path.isfile(input_path) and watch:
+        print("Option --watch can be used on an input directory, input file given.")
+        return -1
+
     # Assicurati che la directory di output esista
     makedirs(output_directory, exist_ok=True)
     if useDpx:
@@ -296,7 +304,7 @@ def process_images_in_directory(input_directory, output_directory, output_format
     if watch:
         print("Waiting for pictures...\n")
         observer = Observer()
-        observer.schedule(event_handler, input_directory, recursive=False)
+        observer.schedule(event_handler, input_path, recursive=False)
         observer.start()
         try:
             while True:
@@ -305,10 +313,19 @@ def process_images_in_directory(input_directory, output_directory, output_format
             observer.stop()
         observer.join()
     else:
-        image_files = get_image_files(input_directory, useDpx, inputExtension)
+        if path.isfile(input_path):
+            image_name = path.basename(input_path)
+            image_files = [image_name]
+            input_path = path.dirname(input_path)
+            if image_name.lower().endswith('.dpx') and not useDpx:
+                print("DPX file format detected, forcing --dpx option.")
+                useDpx = True
+                output_format = 'dpx'
+        else:
+            image_files = get_image_files(input_path, useDpx, inputExtension)
         with tqdm(image_files, desc="Processing images") as pbar:
             for image_file in pbar:
-                input_path = path.join(input_directory, image_file)
+                input_image_path = path.join(input_path, image_file)
                 output_path = path.join(output_directory,
                                         f"{prepend_str}{path.splitext(image_file)[0]}.{output_format}")
                 if exportMask:
@@ -316,21 +333,21 @@ def process_images_in_directory(input_directory, output_directory, output_format
                                                   f"mask_{path.splitext(image_file)[0]}.png")
                 else:
                     output_path_masks = None
-                process_image(input_path, output_path, output_format, quality, clip, output_path_masks, useDpx)
+                process_image(input_image_path, output_path, output_format, quality, clip, output_path_masks, useDpx)
 
 
 if __name__ == "__main__":
-    parser = ArgumentParser(description='Process images and perform white balance on film scans.')
-    parser.add_argument('input_directory', help='Input directory containing images.')
+    parser = ArgumentParser(description='Luchino\'s fucking unsupervised white balance algorithm for films :)\n'
+                                        'Process images and perform white balance on film scans.')
+    parser.add_argument('input_path', help='Input file or directory containing images.')
     parser.add_argument('output_directory', help='Output directory for processed images.')
     parser.add_argument('--outputName', type=str, help='Prepend string followed by underscore to the output filename.')
     parser.add_argument('--dpx', action='store_true',
                         help='Read and write DPX files preserving (if possible) metadata. (default: False)')
     parser.add_argument('--format', help='Output image format. Ignored if --dpx option is used. (default: TIFF, '
-                                         'accepted values: png, jpg, jpeg, bmp,'
-                                         'tiff)', default='tiff')
-    parser.add_argument('--inputExtension', type=str, help='Load only images with given extension. Ignored if --dpx '
-                                                           'option is used.')
+                                         'accepted values: png, jpg, jpeg, bmp, tiff)', default='tiff')
+    parser.add_argument('--inputExtension', type=str, help='Load only images with given extension in input directory. '
+                                                           'Ignored if --dpx option is used.')
     parser.add_argument('--quality', type=int, help='Quality setting for JPG format. (default: 95)')
     parser.add_argument('--clip', action='store_true',
                         help='Clip values after equalization instead of linear rescaling. ('
@@ -342,7 +359,7 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
 
-    input_directory = args.input_directory
+    input_path = args.input_path
     output_directory = args.output_directory
     output_format = args.format
     quality = args.quality
@@ -353,5 +370,5 @@ if __name__ == "__main__":
     outputName = args.outputName
     inputExtension = args.inputExtension
 
-    process_images_in_directory(input_directory, output_directory, output_format, quality, clip, exportMask, useDpx,
+    process_images_in_directory(input_path, output_directory, output_format, quality, clip, exportMask, useDpx,
                                 watch, outputName, inputExtension)
