@@ -1,14 +1,13 @@
-import os.path
-from os import listdir, makedirs, path
 from argparse import ArgumentParser
+from os import listdir, makedirs, path
 from time import sleep
+
 import cv2
+import numba as nb
 import numpy as np
 from tqdm import tqdm
 from watchdog.events import FileSystemEventHandler
 from watchdog.observers import Observer
-import threading
-import numba as nb
 
 from dpx import read_dpx_image_data, write_dpx, read_dpx_meta_data
 
@@ -102,10 +101,10 @@ def process_image(input_path, output_path, output_format='tiff', quality=None, c
 
     # Now we want to look for the least saturated regions, using as a threshold the level of minimum saturation
     # bringing the greates amount of information. This is accomplished by computing the absolute value of the second
-    # derivative of the saturation histogram and using as threshold the first local minimum encountered.
+    # derivative of the saturation cumulative histogram and using as threshold the first local minimum encountered.
     # 1) The cumulative histogram of the saturation is computed using only 20 bins (to account for noise)
     sat_hist = np.histogram(sat[sat < 1], bins=20)[0]
-    # 2) We compute der_cumsum_hist as the absolute value of the second derivative of the histogram
+    # 2) We compute der_cumsum_hist as the absolute value of the second derivative of the cumulative histogram
     der_cumsum_hist = np.diff(np.abs(np.diff(np.cumsum(sat_hist))))
     sat_thrs = 1
     mins_cnt = 0
@@ -157,7 +156,7 @@ def process_image(input_path, output_path, output_format='tiff', quality=None, c
     # If --exportMask option is used, a "masks" folder is created in the output directory and both normal and
     # connected-regions-filtered masks are written in PNG files.
     if exportMask is not None:
-        cv2.imwrite(exportMask, np.hstack([masked_img_not_connected, masked_img_connected]),
+        cv2.imwrite(exportMask, np.hstack([analysis_img_int, masked_img_not_connected, masked_img_connected]),
                     params=get_save_params('png', None))
 
 
@@ -178,12 +177,12 @@ def select_connected_components(binary_image, sat):
     components_scores = []
     for i in np.argsort(stats[1:, cv2.CC_STAT_AREA])[::-1]:
         left, top, width, height, area = stats[i + 1]  # i + 1 to account for the background component
-        # fullness = max(1, (area / (np.power(min(width, height) / 2, 2) * np.pi)))
-        fullness = area / (width * height)
+        fullness = max(1, (area / (np.power(min(width, height) / 2, 2) * np.pi)))
+        # fullness = np.power(area / (width * height), 3)
         squareness = min(width, height) / max(width, height)
         avg_sat = np.mean(sat[labels == i + 1])
         var_sat = np.var(sat[labels == i + 1])
-        components_scores.append([i + 1, fullness * squareness, area, avg_sat, var_sat])
+        components_scores.append([i + 1, fullness * squareness * area / total_area, area, avg_sat, var_sat])
     components_scores_array = np.array(components_scores)
 
     # We filter out the smaller components based on the 90% percentile of the area of the regions. A minimum threshold
@@ -239,7 +238,7 @@ def get_save_params(output_format, quality=None):
     elif output_format.lower() == 'bmp':
         return [cv2.IMWRITE_BMP_RLE, 0]
     else:
-        # Default a TIFF se il formato specificato non è supportato
+        # Default to TIFF if given format is not supported
         return [cv2.IMWRITE_TIFF_COMPRESSION, 5]
 
 
@@ -265,7 +264,6 @@ def process_images_in_directory(input_path, output_directory, output_format='tif
         print("Option --watch can be used on an input directory, input file given.")
         return -1
 
-    # Assicurati che la directory di output esista
     makedirs(output_directory, exist_ok=True)
     if useDpx:
         output_format = 'dpx'

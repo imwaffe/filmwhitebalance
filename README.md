@@ -3,7 +3,7 @@
 Please do not distribute. It's just an alpha, unlike me :(
 
 The main function is in [filmwhitebal.py](./filmwhitebal.py).
-The windows executable is downloadable from [here](./dist/filmwhitebal.exe).
+The windows executable is downloadable from the release.
 
 ### Dependencies
 If using pip, use the following to get all the required packages.
