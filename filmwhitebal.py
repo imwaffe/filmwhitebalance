@@ -102,7 +102,7 @@ def process_image(input_path, output_path, output_format='tiff', quality=None, c
     # Exclude the most saturated regions, setting a threshold of 0.25 or less based on the 75th percentile of the
     # saturation values
     sat_min_thrs = min(np.quantile(sat_map, 0.75), 0.25)
-    
+
     # Now we want to look for the least saturated regions, using as a threshold the level of minimum saturation
     # bringing the greates amount of information. This is accomplished by computing the absolute value of the second
     # derivative of the saturation cumulative histogram and using as threshold the first local minimum encountered.
@@ -176,21 +176,21 @@ def select_connected_components(binary_image, sat_map, light_map):
     # Component score calculation: for each component, we compute a score (between 0 and 1) which is a result of the
     # product of two indicators: squareness and fullness. Squareness amounts to 1 for a component whose bounding box is
     # square and decreases as the bounding box becomes more of a rectangle; fullness amounts to 1 when the area of the
-    # component equals that of the bounding box and decreases as the area of the component lowers.
-    # Saturation stats calculation: for each component, the average saturation and the variance in saturation of the
-    # component is computed.
+    # component is greater or equal to that of a circle inscribed inside the bounding box and decreases as the area of
+    # the component lowers. Saturation stats calculation: for each component, the average saturation and the variance
+    # in saturation of the component is computed. Additionally, the inverse of the MSE of the lightness in the region
+    # is also multiplied by the two other components to make more uniform regions have a higher score.
     # All the stats are saved in the component_scores_array array.
     components_scores = []
     for i in np.argsort(stats[1:, cv2.CC_STAT_AREA])[::-1]:
         left, top, width, height, area = stats[i + 1]  # i + 1 to account for the background component
-        var_light = np.power(1 - np.var(light_map[labels == i + 1]), 2)
+        mse_lightness = np.power(1 - np.var(light_map[labels == i + 1]), 2)
         fullness = max(1, (area / (np.power(min(width, height) / 2, 2) * np.pi)))
-        # fullness = np.power(area / (width * height), 3)
         squareness = min(width, height) / max(width, height)
         avg_sat = np.mean(sat_map[labels == i + 1])
         var_sat = np.var(sat_map[labels == i + 1])
         components_scores.append(
-            [i + 1, var_light * fullness * squareness, area, avg_sat, var_sat, var_light])
+            [i + 1, mse_lightness * fullness * squareness, area, avg_sat, var_sat, mse_lightness])
     components_scores_array = np.array(components_scores)
 
     # We filter out the smaller components based on the 90% percentile of the area of the regions. A minimum threshold
