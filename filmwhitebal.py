@@ -96,36 +96,42 @@ def process_image(input_path, output_path, output_format='tiff', quality=None, c
 
     # The saturation map is computed. This is simply the inverse of the saturation, so 1 corresponds to min saturation
     # and 0 to max saturation.
-    sat = 1 - (np.max(masked_analysis_img_float[:, :, :3], axis=2) - np.min(masked_analysis_img_float[:, :, :3],
-                                                                            axis=2))
+    sat_map = 1 - (np.max(masked_analysis_img_float[:, :, :3], axis=2) - np.min(masked_analysis_img_float[:, :, :3],
+                                                                                axis=2))
 
+    # Exclude the most saturated regions, setting a threshold of 0.25 or less based on the 75th percentile of the
+    # saturation values
+    sat_min_thrs = min(np.quantile(sat_map, 0.75), 0.25)
+    
     # Now we want to look for the least saturated regions, using as a threshold the level of minimum saturation
     # bringing the greates amount of information. This is accomplished by computing the absolute value of the second
     # derivative of the saturation cumulative histogram and using as threshold the first local minimum encountered.
     # 1) The cumulative histogram of the saturation is computed using only 20 bins (to account for noise)
-    sat_hist = np.histogram(sat[sat < 1], bins=20)[0]
+    sat_hist = np.histogram(sat_map[(sat_min_thrs < sat_map) * (sat_map < 1)], bins=20)[0]
     # 2) We compute der_cumsum_hist as the absolute value of the second derivative of the cumulative histogram
     der_cumsum_hist = np.diff(np.abs(np.diff(np.cumsum(sat_hist))))
-    sat_thrs = 1
-    mins_cnt = 0
+    sat_quantile = 1
     # 3) Starting from the values of least saturation (from the right of the histogram), we move toward the values of
     #    higher saturation and look for the first local minimum.
     #    From this step we take the sat_thrs = argmin(der_cumsum_hist).
     for c in range(16, 1, -1):
         if der_cumsum_hist[c + 1] > der_cumsum_hist[c] < der_cumsum_hist[c - 1]:
-            mins_cnt += 1
-            if mins_cnt == 1:
-                sat_thrs = c * 5 / 100
+                sat_quantile = sat_min_thrs + (c * (1 - sat_min_thrs) * 5 / 100)
                 break
 
     # 4) The new mask is computed by taking the dark channel mask and keeping only the pixels having value
     #    greater than or equal to the sat_thrs quantile of the saturation map.
-    mask = ((sat >= np.quantile(sat[sat < 1], sat_thrs)) & (sat < 1)).astype(img.dtype)
+    mask = ((sat_map >= np.quantile(sat_map[sat_map < 1], sat_quantile)) & (sat_map < 1)).astype(img.dtype)
     # mask = ((sat >= sat_thrs) & (sat < 1)).astype(img.dtype)
+
+    # Compute the lightness map needed by selected_connected_components to filter out regions having great MSE in
+    # luminosity, preferring more uniform ones.
+    light_map = 0.299 * analysis_img_float[:, :, 2] + 0.587 * analysis_img_float[:, :, 1] + 0.114 * \
+                analysis_img_float[:, :, 0]
 
     # We filter out the computed mask based on the connected components.
     # Aim of this step is to keep only the biggest, least saturated and most uniform regions.
-    mask_connected = select_connected_components(mask, sat)
+    mask_connected = select_connected_components(mask, sat_map, light_map)
 
     # The analysis image is masked with the obtained mask.
     masked_img_connected = (analysis_img_int * mask_connected[:, :, np.newaxis]).astype(img.dtype)
@@ -160,7 +166,7 @@ def process_image(input_path, output_path, output_format='tiff', quality=None, c
                     params=get_save_params('png', None))
 
 
-def select_connected_components(binary_image, sat):
+def select_connected_components(binary_image, sat_map, light_map):
     # Find connected regions in the binary image
     num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(binary_image.astype(np.uint8))
 
@@ -177,12 +183,14 @@ def select_connected_components(binary_image, sat):
     components_scores = []
     for i in np.argsort(stats[1:, cv2.CC_STAT_AREA])[::-1]:
         left, top, width, height, area = stats[i + 1]  # i + 1 to account for the background component
+        var_light = np.power(1 - np.var(light_map[labels == i + 1]), 2)
         fullness = max(1, (area / (np.power(min(width, height) / 2, 2) * np.pi)))
         # fullness = np.power(area / (width * height), 3)
         squareness = min(width, height) / max(width, height)
-        avg_sat = np.mean(sat[labels == i + 1])
-        var_sat = np.var(sat[labels == i + 1])
-        components_scores.append([i + 1, fullness * squareness * area / total_area, area, avg_sat, var_sat])
+        avg_sat = np.mean(sat_map[labels == i + 1])
+        var_sat = np.var(sat_map[labels == i + 1])
+        components_scores.append(
+            [i + 1, var_light * fullness * squareness, area, avg_sat, var_sat, var_light])
     components_scores_array = np.array(components_scores)
 
     # We filter out the smaller components based on the 90% percentile of the area of the regions. A minimum threshold
@@ -198,7 +206,7 @@ def select_connected_components(binary_image, sat):
             # We select the components in order until we reach at least 10% of the total area of the components
             selected_components_scores.append(components_scores_array[i, :])
             selected_area = selected_area + components_scores_array[i, 2]
-            if selected_area > 0.1 * total_area:
+            if selected_area > 0.25 * total_area:
                 break
 
     # In case we couldn't find any component satisfying any of the conditions, we return the whole binary image,
