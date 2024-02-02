@@ -12,7 +12,7 @@ from watchdog.observers import Observer
 from dpx import read_dpx_image_data, write_dpx, read_dpx_meta_data
 
 
-# The 1D luts to the final image is applied in parallel, which led to a reduction in processing time of >50% for larger
+# The 1D LUTs to the final image is applied in parallel, which led to a reduction in processing time of >50% for larger
 # images
 @nb.njit(parallel=True)
 def apply_lut_parallel_single_channel(img, lut):
@@ -23,26 +23,16 @@ def apply_lut_parallel_single_channel(img, lut):
     return img
 
 
-# White balance with computed coefficients is performed in parallel using one thread per channel,
-# which led to a reduction in processing time of >50% for larger images
+# 1D LUT parallel computation.
+# First parameter is the desired steepness, second parameter is the image structure type, last parameter is the
+# optional rescale factor
 @nb.njit(parallel=True)
-def white_balance_parallel(img, clip, avg_brightness, avg, max_val):
-    img_wb = np.zeros_like(img, dtype=np.float32)
-    img_norm = np.zeros(3, dtype=np.float32)
-    for c in nb.prange(3):
-        if clip:
-            img_wb[:, :, c] = np.clip(img[:, :, c] * (avg_brightness / avg[c]), 0, max_val)
-        else:
-            img_wb[:, :, c] = img[:, :, c] * (avg_brightness / avg[c])
-            img_norm[c] = (max_val / np.maximum(np.max(img_wb[:, :, c]), max_val))
-
-    # If --clip option is not used, all the pixels values are scaled based on the absolute maximum value to prevent
-    # clipping for pixels having values above dtype.max
-    if not clip:
-        for c in nb.prange(3):
-            img_wb[:, :, c] = np.clip(img_wb[:, :, c] * np.min(img_norm), 0, max_val)
-
-    return img_wb
+def compute_lut_parallel(m, dtype=np.uint8, rescale=1):
+    size = 1+np.iinfo(dtype).max
+    lut = np.zeros(size).astype(dtype)
+    for i in nb.prange(size):
+        lut[i] = min(max(0, np.round(i * m * rescale)), size - 1)
+    return lut
 
 
 def process_image(input_path, output_path, output_format='tiff', quality=None, clip=False, exportMask=None,
@@ -116,8 +106,8 @@ def process_image(input_path, output_path, output_format='tiff', quality=None, c
     #    From this step we take the sat_thrs = argmin(der_cumsum_hist).
     for c in range(16, 1, -1):
         if der_cumsum_hist[c + 1] > der_cumsum_hist[c] < der_cumsum_hist[c - 1]:
-                sat_quantile = sat_min_thrs + (c * (1 - sat_min_thrs) * 5 / 100)
-                break
+            sat_quantile = sat_min_thrs + (c * (1 - sat_min_thrs) * 5 / 100)
+            break
 
     # 4) The new mask is computed by taking the dark channel mask and keeping only the pixels having value
     #    greater than or equal to the sat_thrs quantile of the saturation map.
@@ -146,18 +136,33 @@ def process_image(input_path, output_path, output_format='tiff', quality=None, c
     # From avg[] we computed avg_brightness as the average brightness of the unmasked regions.
     avg_brightness = 0.299 * avg[2] + 0.587 * avg[1] + 0.114 * avg[0]
 
+    # Prepare the structure for storing the white balanced image
+    white_balanced_img = np.zeros(img.shape).astype(img.dtype)
+    # Compute the white balance coefficients for each channel, as the average brightness divided by each channel's
+    # average intensity
+    white_balance_coeffs = [avg_brightness/avg[0], avg_brightness/avg[1], avg_brightness/avg[2]]
+    # Set the rescale coefficient to prevent or force clipping
+    if np.max(white_balance_coeffs) <= 1 or clip:
+        rescale_coeff = 1
+    else:
+        rescale_coeff = 1/np.max(white_balance_coeffs)
+    # For each channel, comput and apply the LUTs
+    for c in range(3):
+        wb_lut = compute_lut_parallel(white_balance_coeffs[c], img.dtype, rescale_coeff)
+        white_balanced_img[:, :, c] = apply_lut_parallel_single_channel(img[:, :, c], wb_lut)
+
     # We compute the white balance coefficients as coeff[c] = avg_brightness/avg[c].
     # Using the computed coefficients all the pixels in the actual input img is scaled.
-    img_wb = white_balance_parallel(img, clip, avg_brightness, avg, max_val)
+    # img_wb = white_balance_parallel(img, clip, avg_brightness, avg, max_val)
 
     # If --dpx option is used, the file is written using write_dpx function.
     if useDpx:
         with open(output_path, "wb+") as output_file:
             metadata['creator'] = "Luchino's fucking unsupervised white balance algorithm :) - " + metadata['creator']
             scale_f = (np.power(2, metadata['depth']) - 1) / max_val
-            write_dpx(output_file, cv2.cvtColor((img_wb * scale_f).astype(np.uint16), cv2.COLOR_BGR2RGB), metadata)
+            write_dpx(output_file, cv2.cvtColor((white_balanced_img * scale_f).astype(np.uint16), cv2.COLOR_BGR2RGB), metadata)
     else:
-        cv2.imwrite(output_path, img_wb.astype(img.dtype), params=get_save_params(output_format, quality))
+        cv2.imwrite(output_path, white_balanced_img.astype(img.dtype), params=get_save_params(output_format, quality))
 
     # If --exportMask option is used, a "masks" folder is created in the output directory and both normal and
     # connected-regions-filtered masks are written in PNG files.
