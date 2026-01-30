@@ -14,7 +14,7 @@ py -m pip install argparse opencv.python numpy tqdm watchdog numba==0.59.0rc1
 ### Usage
 This is a command line program, following is the syntax (if using the executable).
 ~~~
-usage: filmwhitebal.py [-h] [--outputName OUTPUTNAME] [--dpx] [--format FORMAT] [--inputExtension INPUTEXTENSION]
+usage: filmwhitebal [-h] [--outputName OUTPUTNAME] [--dpx] [--format FORMAT] [--inputExtension INPUTEXTENSION]
                        [--quality QUALITY] [--clip] [--exportMask] [--watch]
                        input_path output_directory
 
